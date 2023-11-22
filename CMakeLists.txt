@@ -34,10 +34,12 @@ pico_sdk_init()
     # set(WOLFMQTT_ROOT $ENV{WOLFMQTT_ROOT})
     # include_directories(${WOLFSSL_ROOT})
 
-# ## End of Global Include Path
+### End of Global Include Path
 
+### Initialize all other external libs & dependencies
 include(wolfssl_import.cmake)
 include(wolfmqtt_import.cmake)
+include(FreeRTOS_Kernel_import.cmake)
 
 ### Test wolfCrypt algorithms
     add_executable(testwolfcrypt
@@ -251,7 +253,7 @@ pico_add_extra_outputs(mqttSubscribe_picoLED)
 ### End of MQTT Subscribe pico LED Client
 
 
-### MQTT Publish_picoLED
+### MQTT Publish_picoLED with FreeRTOS
 add_executable(mqttPublish_picoLED
 src/mqttPublish_picoLED.c
 src/blink.c
@@ -278,6 +280,8 @@ pico_lwip_nosys
 pico_async_context_poll
 wolfssl
 wolfmqtt
+FreeRTOS-Kernel-Heap4 # FreeRTOS kernel and dynamic heap
+FREERTOS_PORT # FreeRTOS config files for RP2040
 )
 
 
@@ -285,5 +289,37 @@ pico_enable_stdio_usb(mqttPublish_picoLED 1)
 pico_enable_stdio_uart(mqttPublish_picoLED 0)
 
 pico_add_extra_outputs(mqttPublish_picoLED)
+
+### End of MQTT Publish pico LED Client
+
+
+### Multi task Example using FreeRTOS 
+add_executable(multitask
+src/multitask.c
+src/blink.c
+)
+target_compile_definitions(multitask PRIVATE
+PICO_CYW43_ARCH_POLL=1
+NO_SYS=1
+
+)
+target_link_libraries(multitask
+pico_stdlib
+pico_rand
+pico_lwip
+pico_cyw43_arch
+pico_lwip_nosys
+pico_async_context_poll
+wolfssl
+wolfmqtt
+FreeRTOS-Kernel-Heap4 # FreeRTOS kernel and dynamic heap
+FREERTOS_PORT # FreeRTOS config files for RP2040
+)
+
+
+pico_enable_stdio_usb(multitask 1)
+pico_enable_stdio_uart(multitask 0)
+
+pico_add_extra_outputs(multitask)
 
 ### End of MQTT Publish pico LED Client

@@ -50,6 +50,8 @@
 
 #include "tiny-json.h"
 
+#include <FreeRTOS.h>
+#include <task.h>
 
 #define MAX_BUFFER_SIZE 1024
 #define TEST_MOSQUITTO_ORG_IP "91.121.93.94"
@@ -152,7 +154,119 @@ static int mqtt_message_cb(MqttClient *client, MqttMessage *msg,
     return MQTT_CODE_SUCCESS;
 }
 
+void vTask_publish(void *pvParameters);
+void vTask_waitMQTTPacket(void *pvParameters);
 
+TaskHandle_t xTask1Handle = NULL;
+TaskHandle_t xTask2Handle = NULL;
+
+void vTask_publish(void *pvParameters) {
+    int rc;
+    MQTTCtx* mqttCtx = (MQTTCtx*)pvParameters;
+    /* Set up for Publish Topic */
+    XMEMSET(&mqttCtx->publish, 0, sizeof(MqttPublish));
+    mqttCtx->publish.retain = 0;
+    mqttCtx->publish.qos = mqttCtx->qos;
+    mqttCtx->publish.duplicate = 0;
+    mqttCtx->publish.topic_name = mqttCtx->topic_name;
+    mqttCtx->publish.packet_id = mqtt_get_packetid();
+
+    /* Waiting for button input */
+
+    gpio_init(IN_BUTTON_PIN);
+    gpio_set_dir(IN_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(IN_BUTTON_PIN);
+
+    printf("TASK 1 Start!!!\n");
+    bool led_value = false;
+    while (true) {
+        printf("**** TASK 1 ****\n");
+
+        //  Read a value from pin 
+        bool btn_value = gpio_get(IN_BUTTON_PIN);
+
+        // Detect switch press
+        if (btn_value) {
+            led_value = !led_value;
+            switch (led_value) {
+                case false:
+                    /* Publish Topic */
+                    mqttCtx->publish.buffer = (byte*)LED_OFF_MSG;
+                    mqttCtx->publish.total_len = (word16)XSTRLEN(LED_OFF_MSG);
+                    rc = MqttClient_Publish(&mqttCtx->client, &mqttCtx->publish);
+                    PRINTF("MQTT Publish: Topic %s, %s %s (%d)",
+                        mqttCtx->publish.topic_name,
+                         mqttCtx->publish.buffer,
+                        MqttClient_ReturnCodeToString(rc), rc);
+                    break;
+                case true:
+                    /* Publish Topic */
+                    mqttCtx->publish.buffer = (byte*)LED_ON_MSG;
+                    mqttCtx->publish.total_len = (word16)XSTRLEN(LED_ON_MSG);
+                    rc = MqttClient_Publish(&mqttCtx->client, &mqttCtx->publish);
+                    PRINTF("MQTT Publish: Topic %s, %s %s (%d)",
+                        mqttCtx->publish.topic_name,
+                         mqttCtx->publish.buffer,
+                        MqttClient_ReturnCodeToString(rc), rc);
+                    break;
+            }
+
+            // Wait until switch is released
+            while (gpio_get(IN_BUTTON_PIN)) {
+                tight_loop_contents();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void vTask_waitMQTTPacket(void *pvParameters) {
+    int rc;
+    MQTTCtx* mqttCtx = (MQTTCtx*)pvParameters;
+    /* Read Loop */
+    printf("TASK 2 Start!!!\n");
+    PRINTF("MQTT Waiting for message...");
+
+    do {
+        /* check for test mode */
+        if (mqttCtx->test_mode) {
+            PRINTF("MQTT Test mode, exit now");
+            break;
+        }
+
+        /* Try and read packet */
+        rc = MqttClient_WaitMessage(&mqttCtx->client,
+                                            mqttCtx->cmd_timeout_ms);
+
+
+
+        if (mStopRead) {
+            rc = MQTT_CODE_SUCCESS;
+            PRINTF("MQTT Exiting...");
+            break;
+        }
+
+        /* check return code */
+        else if (rc == MQTT_CODE_ERROR_TIMEOUT) {
+            /* Keep Alive */
+            PRINTF("Keep-alive timeout, sending ping");
+
+            rc = MqttClient_Ping_ex(&mqttCtx->client, &mqttCtx->ping);
+            if (rc != MQTT_CODE_SUCCESS) {
+                PRINTF("MQTT Ping Keep Alive Error: %s (%d)",
+                    MqttClient_ReturnCodeToString(rc), rc);
+                break;
+            }
+        }
+        else if (rc != MQTT_CODE_SUCCESS) {
+            /* There was an error */
+            PRINTF("MQTT Message Wait: %s (%d)",
+                MqttClient_ReturnCodeToString(rc), rc);
+            break;
+        }
+    } while (!mStopRead);
+
+}
 
 
 /* mqtt Publish example */
@@ -291,102 +405,16 @@ int mqttPublish_picoLED(MQTTCtx *mqttCtx)
             topic->qos, topic->return_code);
     }
 
-    /* Set up for Publish Topic */
-    XMEMSET(&mqttCtx->publish, 0, sizeof(MqttPublish));
-    mqttCtx->publish.retain = 0;
-    mqttCtx->publish.qos = mqttCtx->qos;
-    mqttCtx->publish.duplicate = 0;
-    mqttCtx->publish.topic_name = mqttCtx->topic_name;
-    mqttCtx->publish.packet_id = mqtt_get_packetid();
-
-    /* Waiting for button input */
-
-    gpio_init(IN_BUTTON_PIN);
-    gpio_set_dir(IN_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(IN_BUTTON_PIN);
 
 
-    bool led_value = false;
-    while (true) {
-        //  Read a value from pin 
-        bool btn_value = gpio_get(IN_BUTTON_PIN);
+    // Create Tasks
+    xTaskCreate(vTask_publish, "Task 1", configMINIMAL_STACK_SIZE, (void *)mqttCtx, 1, &xTask1Handle);
+    xTaskCreate(vTask_waitMQTTPacket, "Task 2", configMINIMAL_STACK_SIZE, (void *)mqttCtx, 1, &xTask2Handle);
 
-        // Detect switch press
-        if (btn_value) {
-            led_value = !led_value;
-            switch (led_value) {
-                case false:
-                    /* Publish Topic */
-                    mqttCtx->publish.buffer = (byte*)LED_OFF_MSG;
-                    mqttCtx->publish.total_len = (word16)XSTRLEN(LED_OFF_MSG);
-                    rc = MqttClient_Publish(&mqttCtx->client, &mqttCtx->publish);
-                    PRINTF("MQTT Publish: Topic %s, %s %s (%d)",
-                        mqttCtx->publish.topic_name,
-                         mqttCtx->publish.buffer,
-                        MqttClient_ReturnCodeToString(rc), rc);
-                    break;
-                case true:
-                    /* Publish Topic */
-                    mqttCtx->publish.buffer = (byte*)LED_ON_MSG;
-                    mqttCtx->publish.total_len = (word16)XSTRLEN(LED_ON_MSG);
-                    rc = MqttClient_Publish(&mqttCtx->client, &mqttCtx->publish);
-                    PRINTF("MQTT Publish: Topic %s, %s %s (%d)",
-                        mqttCtx->publish.topic_name,
-                         mqttCtx->publish.buffer,
-                        MqttClient_ReturnCodeToString(rc), rc);
-                    break;
-            }
-
-            // Wait until switch is released
-            while (gpio_get(IN_BUTTON_PIN)) {
-                tight_loop_contents();
-            }
-        }
-        sleep_ms(10);
-    }
-
-
-    /* Read Loop */
-    PRINTF("MQTT Waiting for message...");
-
-    do {
-        /* check for test mode */
-        if (mqttCtx->test_mode) {
-            PRINTF("MQTT Test mode, exit now");
-            break;
-        }
-
-        /* Try and read packet */
-        rc = MqttClient_WaitMessage(&mqttCtx->client,
-                                            mqttCtx->cmd_timeout_ms);
-
-
-
-        if (mStopRead) {
-            rc = MQTT_CODE_SUCCESS;
-            PRINTF("MQTT Exiting...");
-            break;
-        }
-
-        /* check return code */
-        else if (rc == MQTT_CODE_ERROR_TIMEOUT) {
-            /* Keep Alive */
-            PRINTF("Keep-alive timeout, sending ping");
-
-            rc = MqttClient_Ping_ex(&mqttCtx->client, &mqttCtx->ping);
-            if (rc != MQTT_CODE_SUCCESS) {
-                PRINTF("MQTT Ping Keep Alive Error: %s (%d)",
-                    MqttClient_ReturnCodeToString(rc), rc);
-                break;
-            }
-        }
-        else if (rc != MQTT_CODE_SUCCESS) {
-            /* There was an error */
-            PRINTF("MQTT Message Wait: %s (%d)",
-                MqttClient_ReturnCodeToString(rc), rc);
-            break;
-        }
-    } while (!mStopRead);
+    // Start Scheduler
+    vTaskStartScheduler();
+    // loop 
+    while(true);
 
     /* Check for error */
     if (rc != MQTT_CODE_SUCCESS) {
@@ -449,6 +477,9 @@ int set_mqtt_ctx(MQTTCtx* mqttCtx){
     
     return 0;
 }
+
+
+
 
 
 void main(void)
